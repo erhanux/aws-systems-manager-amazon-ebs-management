@@ -19,7 +19,7 @@ from botocore.exceptions import ClientError
 def getCloudTrailEvents(startDateTime, rgn):
     # gets CloudTrail events from startDateTime until "now"
     cloudTrail = boto3.client('cloudtrail', region_name=rgn)
-    attrList = [{'AttributeKey': 'ResourceType', 'AttributeValue': 'AWS::EC2::Volume'}]
+    attrList = [{'AttributeKey': 'EventName', 'AttributeValue': 'DetachVolume'}]
     eventList = []
     response = cloudTrail.lookup_events(LookupAttributes=attrList, StartTime=startDateTime, MaxResults=50)
     eventList += response['Events']
@@ -35,29 +35,32 @@ def getAvailableVolumes(rgn):
     filterList = [{'Name': 'status', 'Values': ['available']}]
     response = ec2.describe_volumes(Filters=filterList, MaxResults=500)
     for v in response['Volumes']:
-        availableVolList.append(v['VolumeId'])
+        # Ignore volumes that are created within IGNORE_WINDOW
+        if (datetime.now(timezone.utc) - v['CreateTime']).days > IGNORE_WINDOW:
+            availableVolList.append(v['VolumeId'])
     while('NextToken' in response):
         response = ec2.describe_volumes(Filters=filterList, MaxResults=500, NextToken=response['NextToken'])
         for v in response['Volumes']:
             availableVolList.append(v['VolumeId'])
     return availableVolList
 
+
 def getRecentActiveVolumes(events):
     # parses volumes from list of events from CloudTrail
-    recentActiveVolumeList = []
+    recentActiveVolumeSet = set()
     for e in events:
         for i in e['Resources']:
             if i['ResourceType'] == 'AWS::EC2::Volume':
-                recentActiveVolumeList.append(i['ResourceName'])
-    recentActiveVolumeSet = set(recentActiveVolumeList) # remove duplicates
+                recentActiveVolumeSet.add(i['ResourceName'])
+
     return recentActiveVolumeSet
 
-def identifyAgedVolumes(availableVolList, activeVolList):
+def identifyAgedVolumes(availableVolList, activeVolSet):
     # remove and return EBS volumes which are recently active from the list of available volumes
     if len(availableVolList) == 0:
         return None
     else:
-        agedVolumes = list(set(availableVolList) - set(activeVolList))
+        agedVolumes = list(set(availableVolList) - activeVolSet)
         return agedVolumes
 
 def buildOpsEntries(vols, rgn, acctID):
